@@ -16,7 +16,25 @@ class RajamonRouter
         $this->routesDir = $routesDir ?? dirname(__DIR__) . '/routes';
         $this->onNotFound = $onNotFound;
 
-        $this->registerRoutesFromDir($this->routesDir);
+        $cachedRoute = apcu_fetch('routes');
+        if ($cachedRoute && !empty($cachedRoute)) {
+            foreach ($cachedRoute as $r) {
+                if (!file_exists($r['file']) || filemtime($r['file']) > $r['file_mtime']) {
+                    $cachedRoute = null;
+                    break;
+                }
+            }
+        }
+
+        if ($cachedRoute && !empty($cachedRoute)) {
+            error_log("Cache used");
+            $this->routes = $cachedRoute;
+        } else {
+            error_log("Cache refresh");
+            $this->registerRoutesFromDir($this->routesDir);
+            apcu_store('routes', $this->routes);
+        }
+
 
         if ($autoRun) {
             register_shutdown_function([$this, 'autoDispatch']);
@@ -46,14 +64,9 @@ class RajamonRouter
 
         foreach ($iterator as $file) {
             if ($file->isFile() && $file->getExtension() === 'php') {
-                $before = get_declared_classes();
-                require_once $file->getRealPath();
-                $after = get_declared_classes();
-                $new = array_diff($after, $before);
-
-                foreach ($new as $className) {
+                    $className = basename($file->getRealPath(), '.php');
+                    require_once $file->getRealPath();
                     $this->registerRoutesFromClass($className);
-                }
             }
         }
     }
@@ -82,6 +95,8 @@ class RajamonRouter
                     'class' => $className,
                     'function' => $method->getName(),
                     'middlewares' => array_merge($classMiddlewares, $methodMiddlewares),
+                    'file' => $refClass->getFileName(),
+                    'file_mtime' => filemtime($refClass->getFileName()),
                 ];
             }
         }
@@ -115,6 +130,14 @@ class RajamonRouter
                 $route['method'] === strtoupper($requestMethod)
                 && preg_match($pattern, $requestUri, $matches)
             ) {
+                if (!class_exists($route['class'])) {
+                    if (!empty($route['file']) && file_exists($route['file'])) {
+                        require_once $route['file'];
+                    } else {
+                        throw new RuntimeException("Impossible de charger la classe {$route['class']} (fichier manquant)");
+                    }
+                }
+
                 $controller = new $route['class']();
                 $params = array_filter($matches, fn($k) => !is_int($k), ARRAY_FILTER_USE_KEY);
 
