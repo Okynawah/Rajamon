@@ -27,10 +27,8 @@ class RajamonRouter
         }
 
         if ($cachedRoute && !empty($cachedRoute)) {
-            error_log("Cache used");
             $this->routes = $cachedRoute;
         } else {
-            error_log("Cache refresh");
             $this->registerRoutesFromDir($this->routesDir);
             apcu_store('routes', $this->routes);
         }
@@ -64,9 +62,9 @@ class RajamonRouter
 
         foreach ($iterator as $file) {
             if ($file->isFile() && $file->getExtension() === 'php') {
-                    $className = basename($file->getRealPath(), '.php');
-                    require_once $file->getRealPath();
-                    $this->registerRoutesFromClass($className);
+                $className = basename($file->getRealPath(), '.php');
+                require_once $file->getRealPath();
+                $this->registerRoutesFromClass($className);
             }
         }
     }
@@ -92,6 +90,7 @@ class RajamonRouter
                 $this->routes[] = [
                     'path' => $path,
                     'method' => strtoupper($route->method),
+                    'cache' => $route->cache,
                     'class' => $className,
                     'function' => $method->getName(),
                     'middlewares' => array_merge($classMiddlewares, $methodMiddlewares),
@@ -130,6 +129,16 @@ class RajamonRouter
                 $route['method'] === strtoupper($requestMethod)
                 && preg_match($pattern, $requestUri, $matches)
             ) {
+                $params = array_filter($matches, fn($k) => !is_int($k), ARRAY_FILTER_USE_KEY);
+                $cacheKey = $this->getCacheKey($route['path'], $route['method'], $params);
+
+                if ($route['cache'] ?? false) {
+                    $cachedResponse = apcu_fetch($cacheKey);
+                    if ($cachedResponse !== false) {
+                        return;
+                    }
+                }
+
                 if (!class_exists($route['class'])) {
                     if (!empty($route['file']) && file_exists($route['file'])) {
                         require_once $route['file'];
@@ -139,13 +148,18 @@ class RajamonRouter
                 }
 
                 $controller = new $route['class']();
-                $params = array_filter($matches, fn($k) => !is_int($k), ARRAY_FILTER_USE_KEY);
 
                 $request = ['uri' => $requestUri, 'method' => $requestMethod];
 
-                // Middleware spécifiques à cette route :
-                $next = function () use ($controller, $route, $params) {
+                $next = function () use ($controller, $route, $params, $cacheKey) {
                     call_user_func_array([$controller, $route['function']], $params);
+                    $response = ob_get_clean();
+
+                    if ($route['cache'] ?? false) {
+                        apcu_store($cacheKey, $response, 60);
+                    }
+
+                    echo $response;
                 };
 
                 foreach (array_reverse($route['middlewares']) as $middlewareClass) {
@@ -178,5 +192,11 @@ class RajamonRouter
             }
             $middleware->handle($request, $next);
         };
+    }
+
+    private function getCacheKey(string $path, string $method, array $params): string
+    {
+        $base = $method . ':' . $path . ':' . json_encode($params);
+        return 'route_cache_' . md5($base);
     }
 }

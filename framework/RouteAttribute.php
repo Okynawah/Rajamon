@@ -6,5 +6,6 @@ class Route
     public function __construct(
         public string $path,
         public string $method = 'GET',
+        public bool $cache = false,
     ) {}
 }
