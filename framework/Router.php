@@ -18,10 +18,12 @@ class RajamonRouter
 
         $cachedRoute = apcu_fetch('routes');
         if ($cachedRoute && !empty($cachedRoute)) {
-            foreach ($cachedRoute as $r) {
-                if (!file_exists($r['file']) || filemtime($r['file']) > $r['file_mtime']) {
-                    $cachedRoute = null;
-                    break;
+            foreach ($cachedRoute as $rGroup) {
+                foreach ($rGroup as $r) {
+                    if (!file_exists($r['file']) || filemtime($r['file']) > $r['file_mtime']) {
+                        $cachedRoute = null;
+                        break 2;
+                    }
                 }
             }
         }
@@ -32,7 +34,6 @@ class RajamonRouter
             $this->registerRoutesFromDir($this->routesDir);
             apcu_store('routes', $this->routes);
         }
-
 
         if ($autoRun) {
             register_shutdown_function([$this, 'autoDispatch']);
@@ -87,7 +88,7 @@ class RajamonRouter
 
                 $methodMiddlewares = array_map(fn($a) => $a->newInstance()->class, $method->getAttributes(Middleware::class));
 
-                $this->routes[] = [
+                $entry = [
                     'path' => $path,
                     'method' => strtoupper($route->method),
                     'cache' => $route->cache,
@@ -97,8 +98,19 @@ class RajamonRouter
                     'file' => $refClass->getFileName(),
                     'file_mtime' => filemtime($refClass->getFileName()),
                 ];
+
+                $key = $this->extractStaticPrefix($path);
+                $this->routes[$key][] = $entry;
             }
         }
+    }
+
+    private function extractStaticPrefix(string $path): string
+    {
+        if (preg_match('#^([^{}]+)#', $path, $m)) {
+            return rtrim($m[1], '/');
+        }
+        return '/';
     }
 
     public function dispatch(string $requestUri, string $requestMethod): void
@@ -120,21 +132,33 @@ class RajamonRouter
     }
 
     private function dispatchToRoute(string $requestUri, string $requestMethod): void
-    {
-        foreach ($this->routes as $route) {
-            $pattern = preg_replace('#\{(\w+)\}#', '(?P<$1>[^/]+)', $route['path']);
-            $pattern = "#^{$pattern}$#";
+{
+    $requestMethod = strtoupper($requestMethod);
+    $segments = explode('/', trim($requestUri, '/'));
+    $segmentCount = count($segments);
 
-            if (
-                $route['method'] === strtoupper($requestMethod)
-                && preg_match($pattern, $requestUri, $matches)
-            ) {
+    for ($i = $segmentCount; $i >= 0; $i--) {
+        $key = '/' . implode('/', array_slice($segments, 0, $i));
+
+        if (!isset($this->routes[$key])) {
+            continue;
+        }
+
+        foreach ($this->routes[$key] as $route) {
+            if ($route['method'] !== $requestMethod) {
+                continue;
+            }
+
+                $pattern = preg_replace('#\{(\w+)\}#', '(?P<$1>[^/]+)', $route['path']);
+                $pattern = "#^{$pattern}$#";
+
+            if (preg_match($pattern, $requestUri, $matches)) {
                 $params = array_filter($matches, fn($k) => !is_int($k), ARRAY_FILTER_USE_KEY);
                 $cacheKey = $this->getCacheKey($route['path'], $route['method'], $params);
-
                 if ($route['cache'] ?? false) {
                     $cachedResponse = apcu_fetch($cacheKey);
                     if ($cachedResponse !== false) {
+                        echo $cachedResponse;
                         return;
                     }
                 }
@@ -148,7 +172,7 @@ class RajamonRouter
                 }
 
                 $controller = new $route['class']();
-
+                ob_start();
                 $request = ['uri' => $requestUri, 'method' => $requestMethod];
 
                 $next = function () use ($controller, $route, $params, $cacheKey) {
@@ -170,15 +194,17 @@ class RajamonRouter
                 return;
             }
         }
-
-        if ($this->onNotFound) {
-            call_user_func($this->onNotFound, $requestUri, $requestMethod);
-            return;
-        }
-
-        http_response_code(404);
-        echo "404 Not Found";
     }
+
+    if ($this->onNotFound) {
+        call_user_func($this->onNotFound, $requestUri, $requestMethod);
+        return;
+    }
+
+    http_response_code(404);
+    echo "404 Not Found";
+}
+
 
     private function wrapMiddleware(string $middlewareClass, array $request, callable $next): callable
     {
@@ -197,6 +223,6 @@ class RajamonRouter
     private function getCacheKey(string $path, string $method, array $params): string
     {
         $base = $method . ':' . $path . ':' . json_encode($params);
-        return 'route_cache_' . md5($base);
+        return 'route_cache_' . hash('xxh3', $base);
     }
 }
